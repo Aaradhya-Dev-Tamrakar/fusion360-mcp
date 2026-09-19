@@ -1,0 +1,13 @@
+{
+	"autodeskProduct":	"Fusion",
+	"type":	"addin",
+	"id":	"d2c33214-5f56-4c91-bf96-b072c478a87b",
+	"author":	"Antigravity",
+	"description":	{
+		"":	"Universal Model Context Protocol (MCP) Bridge for Autodesk Fusion"
+	},
+	"version":	"1.0.0",
+	"runOnStartup":	false,
+	"supportedOS":	"windows|mac",
+	"editOnStartup":	false
+}
