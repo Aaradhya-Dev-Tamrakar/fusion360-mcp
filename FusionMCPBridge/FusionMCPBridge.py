@@ -32,6 +32,79 @@ SERVER_PORT = 9876
 CUSTOM_EVENT_ID = 'FusionMCPBridge_CustomEvent_v1'
 
 
+def get_registry_path():
+    """Returns the path to the shared Autodesk MCP registry."""
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            base_dir = os.path.join(local_app_data, "AutodeskMCP")
+        else:
+            base_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "AutodeskMCP")
+    else:
+        base_dir = os.path.join(os.path.expanduser("~"), ".autodesk_mcp")
+    
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, "registry.json")
+
+
+def register_with_fleet(port, pid=None):
+    """Registers this Fusion instance in the shared fleet registry."""
+    try:
+        reg_file = get_registry_path()
+        data = {"version": "1.0", "updated_at": None, "instances": {}}
+        if os.path.exists(reg_file):
+            try:
+                with open(reg_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict) and "instances" in loaded:
+                        data = loaded
+            except Exception:
+                pass
+
+        pid = pid or os.getpid()
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["updated_at"] = now_iso
+        data["instances"]["fusion"] = {
+            "product": "Autodesk Fusion",
+            "host": SERVER_HOST,
+            "port": port,
+            "pid": pid,
+            "protocol": "http",
+            "endpoint": "/mcp",
+            "health": "/health",
+            "version": "2.0.20",
+            "registered_at": now_iso
+        }
+
+        temp_dir = os.path.dirname(reg_file)
+        with tempfile.NamedTemporaryFile("w", dir=temp_dir, delete=False, encoding="utf-8", prefix="reg_", suffix=".tmp") as f:
+            temp_name = f.name
+            json.dump(data, f, indent=2)
+        os.replace(temp_name, reg_file)
+    except Exception:
+        pass
+
+
+def unregister_from_fleet():
+    """Removes this Fusion instance from the shared fleet registry on shutdown."""
+    try:
+        reg_file = get_registry_path()
+        if not os.path.exists(reg_file):
+            return
+        with open(reg_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "instances" in data and "fusion" in data["instances"]:
+            del data["instances"]["fusion"]
+            data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            temp_dir = os.path.dirname(reg_file)
+            with tempfile.NamedTemporaryFile("w", dir=temp_dir, delete=False, encoding="utf-8", prefix="reg_", suffix=".tmp") as f:
+                temp_name = f.name
+                json.dump(data, f, indent=2)
+            os.replace(temp_name, reg_file)
+    except Exception:
+        pass
+
+
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -508,12 +581,21 @@ def run(context):
         custom_event.add(on_custom_event)
         handlers.append(on_custom_event)
 
-        # Start background HTTP server
-        httpd = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), MCPHTTPRequestHandler)
+        # Start background HTTP server with dynamic port fallback
+        try:
+            httpd = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), MCPHTTPRequestHandler)
+        except OSError:
+            # Fallback to ephemeral port dynamically assigned by OS
+            httpd = ThreadedHTTPServer((SERVER_HOST, 0), MCPHTTPRequestHandler)
+
+        actual_port = httpd.server_address[1]
         server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         server_thread.start()
 
-        msg = f"[FusionMCPBridge] Server started successfully on http://{SERVER_HOST}:{SERVER_PORT}/mcp"
+        # Register with the shared Autodesk MCP Fleet Registry
+        register_with_fleet(actual_port, os.getpid())
+
+        msg = f"[FusionMCPBridge] Server started successfully on http://{SERVER_HOST}:{actual_port}/mcp (Registered in Fleet Registry)"
         if ui:
             # Output to Fusion Text Commands console
             app.log(msg)
@@ -526,6 +608,9 @@ def stop(context):
     """Add-In exit point called when stopped or Fusion exits."""
     global app, httpd, custom_event, handlers, pending_requests
     try:
+        # Unregister from fleet registry
+        unregister_from_fleet()
+
         # Shutdown HTTP server
         if httpd:
             httpd.shutdown()
